@@ -1,1 +1,1 @@
-clang++ main.cpp -o ex02.exe
+clang++ main.cpp -o ex03.exe

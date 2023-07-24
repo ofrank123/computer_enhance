@@ -2,132 +2,60 @@
 
 #include "../common.h"
 
-#define OPCODE_MOV_RMTFR_MASK 0b11111100
-#define OPCODE_MOV_RMTFR      0b10001000
-
-#define MOV_D_MASK           0b00000010
-#define MOV_D_DEST           0b00000010
-#define MOV_D_SRC            0b00000000
-
-#define MOV_W_MASK           0b00000001
-
-#define MOV_MOD_MASK         0b11000000
-
-// Mode Decoding
-#define MOV_MOD_MEM          0b00000000
-#define MOV_MOD_MEM8         0b01000000
-#define MOV_MOD_MEM16        0b10000000
-#define MOV_MOD_REG          0b11000000
-
-#define MOV_REG_MASK         0b00111000
-#define MOV_RM_MASK          0b00000111
-
-#define MOV_EAC_BP           0b00000110
-
-// Immediate to Register
-#define OPCODE_MOV_ITR_MASK  0b11110000
-#define OPCODE_MOV_ITR       0b10110000
-
-#define MOV_ITR_W_MASK       0b00001000
-#define MOV_ITR_REG_MASK     0b00000111
-
-// Immediate to Register/Memory
-#define OPCODE_MOV_ITRM_MASK 0b11111110 
-#define OPCODE_MOV_ITRM      0b11000110
-
-#define MOV_ITRM_W_MASK      0b00000001
-#define MOV_ITRM_MOD_MASK    0b11000000
-#define MOV_ITRM_RM_MASK     0b00000111
-
-// Memory to Accumulator
-#define OPCODE_MOV_MTA_MASK  0b11111110
-#define OPCODE_MOV_MTA       0b10100000
-
-// Accumulator to Memory
-#define OPCODE_MOV_ATM_MASK  0b11111110
-#define OPCODE_MOV_ATM       0b10100010
-
 FILE *fp;
 u32 bytesRead;
-
-enum Reg {
-	REG_AX = 0, REG_AL, REG_AH,
-	REG_BX, REG_BL, REG_BH,
-	REG_CX, REG_CL, REG_CH,
-	REG_DX, REG_DL, REG_DH,
-	REG_SP,
-	REG_BP,
-	REG_SI,
-	REG_DI,
-};
+u32 linenum = 1;
+bool lockPrefix;
+bool segmentPrefix;
+u8 segPrefixVal;
 
 enum ArgTag {
 	ARG_NONE = 0,
 	ARG_REG,
+	ARG_REG_WIDE,
 	ARG_DIR,
 	ARG_DIS,
 	ARG_DIS8,
 	ARG_DIS16,
-	ARG_IMM
+	ARG_IMM,
+    ARG_IMM_WIDE,
+	ARG_IPDIS,
+	ARG_SEG,
+    ARG_DATA
 };
 
 struct DispData {
 	u8 eac;
-	union {
-		u8 d8;
-		u16 d16;
-	} disp;
-};
-
-struct ImmData {
-	bool wide;
-	u16 val;
+    u8 d8;
+    u16 d16;
 };
 
 struct Arg {
 	ArgTag tag;
 
 	union {
-		Reg reg;
+		u8 reg;
 		u16 dir;
 		DispData dis;
-		ImmData imm;
+		u16 imm;
+		u8 sdis;
+		u8 seg;
+		u8 data;
 	} v;
 };
 
-const char *getRegStr(Reg reg) {
-	switch (reg) {
-		case REG_AX: return "ax";
-		case REG_BX: return "bx";
-		case REG_CX: return "cx";
-		case REG_DX: return "dx";
-		case REG_AL: return "al";
-		case REG_BL: return "bl";
-		case REG_CL: return "cl";
-		case REG_DL: return "dl";
-		case REG_AH: return "ah";
-		case REG_BH: return "bh";
-		case REG_CH: return "ch";
-		case REG_DH: return "dh";
-		case REG_SP: return "sp";
-		case REG_BP: return "bp";
-		case REG_SI: return "si";
-		case REG_DI: return "di";
-	}
-}
-
-Reg decodeReg(u8 regCode, bool word) {
-	switch (regCode) {
-		case 0b00000000: return word ? REG_AX : REG_AL;
-		case 0b00000001: return word ? REG_CX : REG_CL;
-		case 0b00000010: return word ? REG_DX : REG_DL;
-		case 0b00000011: return word ? REG_BX : REG_BL;
-		case 0b00000100: return word ? REG_SP : REG_AH;
-		case 0b00000101: return word ? REG_BP : REG_CH;
-		case 0b00000110: return word ? REG_SI : REG_DH;
-		case 0b00000111: return word ? REG_DI : REG_BH;
-	}
-	exit(1);
+const char *getRegStr(u8 reg, bool wide) {
+    switch (reg) {
+        case 0b00000000: return wide ? "ax" : "al";
+        case 0b00000001: return wide ? "cx" : "cl";
+        case 0b00000010: return wide ? "dx" : "dl";
+        case 0b00000011: return wide ? "bx" : "bl";
+        case 0b00000100: return wide ? "sp" : "ah";
+        case 0b00000101: return wide ? "bp" : "ch";
+        case 0b00000110: return wide ? "si" : "dh";
+        case 0b00000111: return wide ? "di" : "bh";
+    }
+    exit(1);
 }
 
 const char *getEacStr(u8 eac) {
@@ -144,61 +72,81 @@ const char *getEacStr(u8 eac) {
 	exit(1);
 }
 
-char *getSignedDispStr(u8 disp) {
-	char *str = allocStr(8);
-	if (disp & (1 << 7)) {
-		u8 neg = (~disp) + 1;
-		sprintf(str, "- %d", neg);
-	} else {
-		sprintf(str, "+ %d", disp);
-	}
-
-	return str;
+const char *getSegRegStr(u8 segReg) {
+    switch (segReg) {
+        case 0b00000000: return "es";
+        case 0b00000001: return "cs";
+        case 0b00000010: return "ss";
+        case 0b00000011: return "ds";
+    }
+    exit(1);
 }
 
-char *getSignedDispStr(u16 disp) {
-	char *str = allocStr(16);
-	if (disp & (1 << 15)) {
-		u16 neg = (~disp) + 1;
-		sprintf(str, "- %d", neg);
-	} else {
-		sprintf(str, "+ %d", disp);
-	}
-
-	return str;
+const char *getSegPrefix() {
+	char *str = allocStr(5);
+    if (segmentPrefix) {
+        sprintf(str, "%s:", getSegRegStr(segPrefixVal));
+        return str;
+    } else {
+        return "";
+    }
 }
 
-char *getPrefixedImmStr(u16 immVal, bool wide) {
-	char *str = allocStr(16);
-	if (wide) {
-		sprintf(str, "word %d", immVal);
-	} else {
-		sprintf(str, "byte %d", immVal);
-	}
-	return str;
+const char *getSizePrefix(bool needsSizePrefix, bool wide) {
+    if (needsSizePrefix) {
+        return wide ? "word " : "byte ";
+    }
+    return "";
 }
 
-char *getArgStr(Arg arg) {
+const char *getMemPrefix(bool needsSizePrefix, bool wide) {
+    char *str = allocStr(12);
+    sprintf(str, "%s%s", getSizePrefix(needsSizePrefix, wide), getSegPrefix());
+    return str;
+}
+
+char *getArgStr(Arg arg, bool needsSizePrefix, bool wide) {
 	char *str = allocStr(32);
 	switch (arg.tag) {
-		case ARG_REG: return (char *) getRegStr(arg.v.reg);
-		case ARG_IMM: return getPrefixedImmStr(arg.v.imm.val, arg.v.imm.wide);
+		case ARG_REG: return (char *) getRegStr(arg.v.reg, false);
+		case ARG_REG_WIDE: return (char *) getRegStr(arg.v.reg, true);
+        case ARG_IMM: sprintf(str, "byte %d", arg.v.imm); break;
+        case ARG_IMM_WIDE: sprintf(str, "word %d", arg.v.imm); break;
 		case ARG_DIS:
-			sprintf(str, "[%s]", getEacStr(arg.v.dis.eac));
+			sprintf(str, "%s[%s]",
+                    getMemPrefix(needsSizePrefix, wide),
+                    getEacStr(arg.v.dis.eac));
 			break;
 		case ARG_DIS8:
-			sprintf(str, "[%s %s]",
+			sprintf(str, "%s[%s %s %d]",
+                    getMemPrefix(needsSizePrefix, wide),
 					getEacStr(arg.v.dis.eac),
-					getSignedDispStr(arg.v.dis.disp.d8));
+					arg.v.dis.d8 & (1 << 7) ? "-" : "+",
+                    arg.v.dis.d8 & (1 << 7) ? (u8) (~arg.v.dis.d8) + 1 : arg.v.dis.d8);
 			break;
 		case ARG_DIS16:
-			sprintf(str, "[%s %s]",
+			sprintf(str, "%s[%s %s %d]",
+                    getMemPrefix(needsSizePrefix, wide),
 					getEacStr(arg.v.dis.eac),
-					getSignedDispStr(arg.v.dis.disp.d16));
+					arg.v.dis.d16 & (1 << 15) ? "-" : "+",
+                    arg.v.dis.d16 & (1 << 15) ? (u16) (~arg.v.dis.d16) + 1 : arg.v.dis.d16);
 			break;
 		case ARG_DIR:
-			sprintf(str, "[%d]", arg.v.dir);
+			sprintf(str, "%s[%d]",
+                    getMemPrefix(needsSizePrefix, wide),
+                    arg.v.dir);
 			break;
+		case ARG_IPDIS:
+			sprintf(str, "%s%d", 
+					arg.v.sdis & (1 << 7) ? "-" : "+",
+                    arg.v.sdis & (1 << 7) ? (u8) (~arg.v.sdis) + 1 : arg.v.sdis);
+			break;
+        case ARG_SEG:
+            sprintf(str, "%s", getSegRegStr(arg.v.seg));
+            break;
+        case ARG_DATA:
+            sprintf(str, "%d", arg.v.data);
+            break;
 		case ARG_NONE:
 			printf("ARG_NONE Printed!\n");
 			exit(1);
@@ -219,123 +167,372 @@ u16 readData(bool wide) {
 	return ret;
 }
 
+Arg decodeRm(u8 rm, u8 mod, bool wide) {
+	Arg arg{};
+	if (mod == 0b11000000) { // Register
+		arg.tag = wide ? ARG_REG_WIDE : ARG_REG;
+		arg.v.reg = rm;
+	} else { // Memory
+		if (mod == 0 && rm == 0b00000110) { // Direct Addressing
+			arg.tag = ARG_DIR;
+			arg.v.dir = readData(true);
+		} else { // Indirect Addressing
+			arg.v.dis.eac = rm;
+			if (mod == 0) { // No Displacement
+				arg.tag = ARG_DIS;
+			} else if (mod == 0b01000000) { // 8 Bit Displacement
+				arg.tag = ARG_DIS8;
+				arg.v.dis.d8 = readData(false);
+			} else if (mod == 0b10000000) { // 16 Bit Displacement
+				arg.tag = ARG_DIS16;
+				arg.v.dis.d16 = readData(true);
+			}
+		}
+	}
+
+	return arg;
+}
+
+//  12|345|678
+// mod|reg|rm
+void decodeModRegRm(u8 data, bool wide, Arg *reg, Arg *rm) {
+    if (reg != NULL) {
+        reg->tag = wide ? ARG_REG_WIDE : ARG_REG;
+        reg->v.reg = (data & 0b00111000) >> 3;
+    }
+    if (rm != NULL) {
+        *rm = decodeRm(data & 0b00000111, data & 0b11000000, wide);
+    }
+}
+
+const char *getOpStr(u8 byte1, u8 opByte) {
+    if ((byte1 & 0b11111110) == 0b11000110 ||
+        (byte1 & 0b11111100) == 0b10001000 ||
+        (byte1 & 0b11110000) == 0b10110000 ||
+        (byte1 & 0b11111110) == 0b10100000 ||
+        (byte1 & 0b11111110) == 0b10100010) {
+        return "mov";
+    }
+    // Arithmetic ops that follow sub-op pattern
+    if ((byte1 & 0b11000100) == 0b00000000 ||
+        (byte1 & 0b11111100) == 0b10000000 ||
+        (byte1 & 0b11000110) == 0b00000100) {
+        switch (opByte & 0b00111000) {
+            case 0b00000000: return "add"; 
+            case 0b00101000: return "sub";
+            case 0b00111000: return "cmp";
+            case 0b00010000: return "adc";
+            case 0b00100000: return "and";
+            case 0b00001000: return "or";
+            case 0b00110000: return "xor";
+            case 0b00011000: return "sbb";
+        }
+    }
+    if ((byte1 & 0b11110000) == 0b01110000) {
+        switch (byte1 & 0b00001111) {
+            case 0b00000000: return "jo";
+            case 0b00000001: return "jno";
+            case 0b00000010: return "jb";
+            case 0b00000011: return "jnb";
+            case 0b00000100: return "je";
+            case 0b00000101: return "jne";
+            case 0b00000110: return "jbe";
+            case 0b00000111: return "ja";
+            case 0b00001000: return "js";
+            case 0b00001001: return "jns";
+            case 0b00001010: return "jp";
+            case 0b00001011: return "jnp";
+            case 0b00001100: return "jl";
+            case 0b00001101: return "jnl";
+            case 0b00001110: return "jle";
+            case 0b00001111: return "jg";
+        }
+    }
+    if ((byte1 & 0b11110000) == 0b11100000) {
+        switch (byte1 & 0b00001111) {
+            case 0b00000000: return "loopne";
+            case 0b00000001: return "loopz";
+            case 0b00000010: return "loop";
+            case 0b00000011: return "jcxz";
+        }
+    }
+    if ((byte1 & 0b11111111) == 0b11111111 ||
+        (byte1 & 0b11111000) == 0b01010000 ||
+        (byte1 & 0b11100111) == 0b00000110) {
+        return "push";
+    }
+    if ((byte1 & 0b11111111) == 0b10001111 ||
+        (byte1 & 0b11111000) == 0b01011000 ||
+        (byte1 & 0b11100111) == 0b00000111) {
+        return "pop";
+    }
+    if ((byte1 & 0b11111110) == 0b10000110 ||
+        (byte1 & 0b11111000) == 0b10010000) {
+        return "xchg";
+    }
+    if ((byte1 & 0b11111110) == 0b11100100 ||
+        (byte1 & 0b11111110) == 0b11101100) {
+        return "in";
+    }
+    if ((byte1 & 0b11111110) == 0b11100110 ||
+        (byte1 & 0b11111110) == 0b11101110) {
+        return "out";
+    }
+    if ((byte1 & 0b11111110) == 0b11110110) {
+        if ((opByte & 0b00111000) == 0b00000000) return "test";
+        if ((opByte & 0b00111000) == 0b00010000) return "not";
+    }
+    switch(byte1) {
+        case 0b11010111: return "xlat";
+        case 0b10001101: return "lea";
+        case 0b11000101: return "lds";
+        case 0b11000100: return "les";
+        case 0b10011111: return "lahf";
+        case 0b10011110: return "sahf";
+        case 0b10011100: return "pushf";
+        case 0b10011101: return "popf";
+        case 0b11001101: return "int";
+        case 0b11001100: return "int3";
+        case 0b11001110: return "into";
+        case 0b11001111: return "iret";
+        case 0b11111000: return "clc";
+        case 0b11110101: return "cmc";
+        case 0b11111001: return "stc";
+        case 0b11111100: return "cld";
+        case 0b11111101: return "std";
+        case 0b11111010: return "cli";
+        case 0b11111011: return "sti";
+        case 0b11110100: return "hlt";
+        case 0b10011011: return "wait";
+    }
+
+    printf("%X ", byte1);
+    return "NOP";
+}
+
 void decodeNextOp() {
 	u8 byte1 = readData(false);
+    bool wide = byte1 & 0b00000001;
+    u8 opByte = byte1;
 
-	char op[5];
+	char op[8];
 	Arg dst{};
 	Arg src{};
 
-	if ((byte1 & OPCODE_MOV_RMTFR_MASK) == OPCODE_MOV_RMTFR ||
-		(byte1 & OPCODE_MOV_ITRM_MASK) == OPCODE_MOV_ITRM) {
-		strcpy(op, "mov");
-		u8 byte2 = readData(false);
+    if ((byte1 & 0b11111110) == 0b11000110 /* mov */ ||
+        (byte1 & 0b11111100) == 0b10000000 /* arith */ ||
+        (byte1 & 0b11111110) == 0b11110110 /* not, test */) {
+        // Reg/Mem, Immediate
 
-		bool immediate = (byte1 & OPCODE_MOV_ITRM_MASK) == OPCODE_MOV_ITRM;
+        u8 byte2 = readData(false);
+		Arg rmArg;
+		decodeModRegRm(byte2, wide, NULL, &rmArg);
+        if (!((byte1 & 0b11111110) == 0b11110110 &&
+              (byte2 & 0b00111000) == 0b00010000)) { // NOT special case, same byte1
+                                                  // as test, but no immediate val
+                                                  // needed
+            src.tag = wide ? ARG_IMM_WIDE : ARG_IMM;
+            if ((byte1 & 0b11000100) == 0b10000000) { // arith itrm special case
+                opByte = byte2;
+                bool wideRead = (wide && !(byte1 & 0b00000010)); // S: 0 + W: 1
+                src.v.imm = readData(wideRead);
+            } else {
+                src.v.imm = readData(wide);
+            }
+        }
 
-		bool wide = byte1 & MOV_ITRM_W_MASK;
-		u8 mode = byte2 & MOV_MOD_MASK;
-		u8 reg = (byte2 & MOV_REG_MASK) >> 3;
-		u8 rm = byte2 & MOV_RM_MASK;
+        opByte = byte2; // For test and not
 
-		if (immediate) {
-			src.tag = ARG_IMM;
-		} else if ((byte1 & MOV_D_MASK) == MOV_D_SRC) {
-			src.tag = ARG_REG;
-			src.v.reg = decodeReg(reg, wide);
-			if (mode == MOV_MOD_REG) {
-				dst.tag = ARG_REG;
-				dst.v.reg = decodeReg(rm, wide);
-			}
-		}
+        dst = rmArg;
+    } else if ((byte1 & 0b11111100) == 0b10001000 /* mov */ ||
+               (byte1 & 0b11000100) == 0b00000000 /* arith */ ||
+               (byte1 & 0b11111110) == 0b10000110 /* xchg */ ||
+               byte1 == 0b10001101 /* lea */ ||
+               byte1 == 0b11000101 /* lds */ ||
+               byte1 == 0b11000100 /* les */) {
+        // Reg/Mem, Reg/Mem
+        u8 byte2 = readData(false);
+        bool dSet = byte1 & 0b00000010;
+        Arg regArg, rmArg;
 
-		if ((byte1 & MOV_D_MASK) == MOV_D_DEST) {
-			dst.tag = ARG_REG;
-			dst.v.reg = decodeReg(reg, wide);
-			if (!immediate && mode == MOV_MOD_REG) {
-				src.tag = ARG_REG;
-				src.v.reg = decodeReg(rm, wide);
-			}
-		}
+        if (byte1 == 0b10001101 /* lea */ ||
+            byte1 == 0b11000101 /* lds */ ||
+            byte1 == 0b11000100 /* les */) {
+            wide = true;
+            dSet = true;
+        }
 
-		if (mode != MOV_MOD_REG) {
-			Arg memArg{};
-			if (mode == MOV_MOD_MEM && rm == MOV_EAC_BP) { // Direct Addressing
-				memArg.tag = ARG_DIR;
-				memArg.v.dir = readData(true);
-			} else {
-				memArg.v.dis.eac = rm;
-				if (mode == MOV_MOD_MEM) {
-					memArg.tag = ARG_DIS;
-				} else if (mode == MOV_MOD_MEM8) {
-					memArg.tag = ARG_DIS8;
-					memArg.v.dis.disp.d8 = readData(false);
-				} else if (mode == MOV_MOD_MEM16) {
-					memArg.tag = ARG_DIS16;
-					memArg.v.dis.disp.d16 = readData(true);
-				}
-			}
-			if (immediate || dst.tag == ARG_NONE) dst = memArg;
-			else src = memArg;
-		}
+        decodeModRegRm(byte2, wide, &regArg, &rmArg);
 
-		if (immediate) {
-			src.v.imm.wide = wide;
-			src.v.imm.val = readData(wide);
-		}
-	} else if ((byte1 & OPCODE_MOV_ITR_MASK) == OPCODE_MOV_ITR) {
-		strcpy(op, "mov");
-		bool wide = byte1 & MOV_ITR_W_MASK;
-		dst.tag = ARG_REG;
-		dst.v.reg = decodeReg(byte1 & MOV_ITR_REG_MASK, wide);
-		src.tag = ARG_IMM;
-		src.v.imm.wide = wide;
-		src.v.imm.val = readData(wide);
-	} else if ((byte1 & OPCODE_MOV_MTA_MASK) == OPCODE_MOV_MTA) {
-		strcpy(op, "mov");
-		dst.tag = ARG_REG;
-		dst.v.reg = REG_AX;
-		src.tag = ARG_DIR;
-		src.v.dir = readData(byte1 & MOV_W_MASK);
-	} else if ((byte1 & OPCODE_MOV_ATM_MASK) == OPCODE_MOV_ATM) {
-		strcpy(op, "mov");
-		dst.tag = ARG_DIR;
-		dst.v.dir = readData(byte1 & MOV_W_MASK);
-		src.tag = ARG_REG;
-		src.v.reg = REG_AX;
-	} else {
-		printf("Unsupported Operation!\n");
-		exit(1);
-	}
+        if (dSet) {
+            src = rmArg;
+            dst = regArg;
+        } else {
+            src = regArg;
+            dst = rmArg;
+        }
+    } else if ((byte1 & 0b11110000) == 0b10110000 /* mov */) {
+        // Reg, Immediate
 
-	printf("\t%s %s, %s\r\n", op, getArgStr(dst), getArgStr(src));
+        wide = byte1 & 0b00001000;
+
+        dst.tag = wide ? ARG_REG_WIDE : ARG_REG;
+        dst.v.reg = byte1 & 0b00000111;
+
+        src.tag = wide ? ARG_IMM_WIDE : ARG_IMM;
+        src.v.imm = readData(wide);
+    } else if ((byte1 & 0b11111110) == 0b10100000 /* mov */) {
+        // Accumulator, Direct
+
+        dst.tag = ARG_REG_WIDE;
+        dst.v.reg = 0; // AX
+
+        src.tag = ARG_DIR;
+        src.v.dir = readData(wide);
+    } else if ((byte1 & 0b11111110) == 0b10100010 /* mov */) {
+        // Direct, Accumulator
+
+        dst.tag = ARG_DIR;
+        dst.v.dir = readData(wide);
+
+        src.tag = ARG_REG_WIDE;
+        src.v.reg = 0; // AX
+
+    } else if ((byte1 & 0b11000110) == 0b00000100 /* arith */) {
+        // Accumulator, Immediate
+
+        dst.tag = wide ? ARG_REG_WIDE : ARG_REG;
+        dst.v.reg = 0;
+
+        src.tag = wide ? ARG_IMM_WIDE : ARG_IMM;
+        src.v.imm = readData(wide);
+    } else if ((byte1 & 0b11110000) == 0b01110000 /* conditional jumps */ ||
+               (byte1 & 0b11111100) == 0b11100000 /* loops/jcxz */) {
+        // Signed Displacement (Jumps)
+
+        dst.tag = ARG_IPDIS;
+        dst.v.sdis = readData(false);
+    } else if ((byte1 & 0b11111111) == 0b11111111 /* push */ ||
+               (byte1 & 0b11111111) == 0b10001111 /* pop */) {
+        // Register/Memory
+
+        decodeModRegRm(readData(false), true, NULL, &dst);
+    } else if ((byte1 & 0b11111000) == 0b01010000 /* push */ ||
+               (byte1 & 0b11111000) == 0b01011000 /* pop */) {
+        // Register
+
+        dst.tag = ARG_REG_WIDE;
+        dst.v.reg = byte1 & 0b00000111;
+    } else if ((byte1 & 0b11100111) == 0b00000110 /* push */ ||
+               (byte1 & 0b11100111) == 0b00000111 /* pop */) {
+        // Segment Register
+
+        dst.tag = ARG_SEG;
+        dst.v.seg = (byte1 & 0b00011000) >> 3;
+    } else if ((byte1 & 0b11111000) == 0b10010000 /* xchg */) {
+        // Accumulator, Reg
+
+        dst.tag = ARG_REG_WIDE;
+        dst.v.reg = 0; // AX
+        src.tag = ARG_REG_WIDE;
+        src.v.reg = byte1 & 0b00000111;
+    } else if ((byte1 & 0b11111110) == 0b11100100 /* in */ ||
+               (byte1 & 0b11111110) == 0b11100110 /* out */) {
+        // Fixed Port
+
+        dst.tag = wide ? ARG_REG_WIDE : ARG_REG;
+        dst.v.reg = 0; // ax/al
+        src.tag = ARG_DATA;
+        src.v.data = readData(false);
+
+        // Swap if out
+        if ((byte1 & 0b11111110) == 0b11100110) {
+            Arg tmp = dst;
+            dst = src;
+            src = tmp;
+        }
+    } else if ((byte1 & 0b11111110) == 0b11101100 /* in */ ||
+               (byte1 & 0b11111110) == 0b11101110 /* out */) {
+        // Variable Port
+
+        dst.tag = wide ? ARG_REG_WIDE : ARG_REG;
+        dst.v.reg = 0; // ax/al
+        src.tag = ARG_REG_WIDE;
+        src.v.reg = 0b00000010; // dx
+
+        // Swap if out
+        if ((byte1 & 0b11111110) == 0b11101110) {
+            Arg tmp = dst;
+            dst = src;
+            src = tmp;
+        }
+    } else if (byte1 == 0b11001101 /* int */) {
+        // Data
+
+        dst.tag = ARG_DATA;
+        dst.v.data = readData(false);
+    }
+
+    if (byte1 == 0b11110000) { // Lock prefix
+        lockPrefix = true;
+        return;
+    }
+
+    if ((byte1 & 0b11100111) == 0b00100110) { // Segment prefix
+        segmentPrefix = true;
+        segPrefixVal = (byte1 & 0b00011000) >> 3;
+        return;
+    }
+
+    // printf("%d", linenum++);
+    // printf("%X", byte1);
+
+    if (dst.tag == ARG_NONE)
+        printf("\t%s%s\r\n",
+               lockPrefix ? "lock " : "" ,
+               getOpStr(byte1, opByte));
+    else if (src.tag == ARG_NONE)
+        printf("\t%s%s %s\r\n",
+               lockPrefix ? "lock " : "",
+               getOpStr(byte1, opByte),
+               getArgStr(dst, true, wide));
+    else
+        printf("\t%s%s %s, %s\r\n",
+               lockPrefix ? "lock " : "",
+               getOpStr(byte1, opByte),
+               getArgStr(dst, false, wide),
+               getArgStr(src, false, wide));
+
+    lockPrefix = false;
+    segmentPrefix = false;
 }
 
 int main(int argc, char **argv) {
-	if (argc != 2) {
-		printf("No input specified!\n");
-		exit(1);
-	}
+    if (argc != 2) {
+        printf("No input specified!\n");
+        exit(1);
+    }
 
-	initStrArena();
+    initStrArena();
 
-	fp = fopen(argv[1], "r");
-	if (fp == NULL) {
-		perror("Couldn't open file");
-		exit(1);
-	}
+    fp = fopen(argv[1], "r");
+    if (fp == NULL) {
+        perror("Couldn't open file");
+        exit(1);
+    }
 
-	fseek(fp, 0L, SEEK_END);
-	u32 fileSize = ftell(fp);
-	fseek(fp, 0L, SEEK_SET);
+    fseek(fp, 0L, SEEK_END);
+    u32 fileSize = ftell(fp);
+    fseek(fp, 0L, SEEK_SET);
 
-	bytesRead = 0;
+    bytesRead = 0;
 
-	printf("\tbits 16\r\n\r\n");
-	while (bytesRead < fileSize) {
-		decodeNextOp();
-	}
+    printf("\tbits 16\r\n\r\n");
+    linenum += 2;
+    while (bytesRead < fileSize) {
+        decodeNextOp();
+    }
 
-	fclose(fp);
-	destroyStrArena();
+    fclose(fp);
+    destroyStrArena();
 }

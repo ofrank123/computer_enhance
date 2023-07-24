@@ -1,3 +1,4 @@
+#pragma once
 // Common stuff for this course
 
 #define _CRT_SECURE_NO_WARNINGS
