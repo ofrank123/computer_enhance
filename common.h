@@ -9,6 +9,8 @@
 #include <assert.h>
 #include <string.h>
 
+#define PANIC(...) fprintf(stderr, "Uh Oh! %s:%d: ", __FILE__, __LINE__); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); exit(1)
+
 typedef uint8_t  u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
@@ -19,30 +21,25 @@ typedef int16_t i16;
 typedef int32_t i32;
 typedef int64_t i64;
 
-struct StringArena {
+static struct StringArena {
 	char *base;
 	char *head;
 	u32 size;
 } strArena{};
 
-void initStrArena() {
+static void initStrArena() {
 	strArena.base = (char *) malloc(sizeof(char) * 64 * 1024);
 	strArena.head = strArena.base;
 	strArena.size = 64 * 1024;
 }
 
-void destroyStrArena() {
+static void destroyStrArena() {
 	free(strArena.base);
 }
 
-char *allocStr(u32 size) {
+static char *allocStr(u32 size) {
 	assert(((u32) (strArena.head - strArena.base)) + size <= strArena.size);
 	char *str = strArena.head;
 	strArena.head += size;
 	return str;
-}
-
-void expandCurrentStr(u32 size) {
-	assert(((u32) (strArena.head - strArena.base)) + size <= strArena.size);
-	strArena.head += size;
 }
