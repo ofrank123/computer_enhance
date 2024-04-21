@@ -10,3 +10,7 @@ test*
 *.lib
 *.pdb
 *.exp
+
+zig-out/
+zig-cache/
+*raddbg_profile
