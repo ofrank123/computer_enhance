@@ -2,6 +2,7 @@ const std = @import("std");
 const print = std.debug.print;
 
 const hav = @import("./haver_ref.zig");
+const perf = @import("win32_perf.zig");
 
 const TokenKind = enum {
     l_brace,
@@ -34,6 +35,9 @@ inline fn isDigit(char: u8) bool {
 }
 
 pub fn tokenize(allocator: std.mem.Allocator, string: []const u8) []Token {
+    const t = perf.timeFunction(@src());
+    defer perf.stopTimer(t);
+
     var tokens = std.ArrayList(Token).init(allocator);
     var i: u32 = 0;
 
@@ -57,6 +61,8 @@ pub fn tokenize(allocator: std.mem.Allocator, string: []const u8) []Token {
             },
             ' ', '\n', '\r', '\t' => continue,
             else => t: {
+                const t_else = perf.timeBlock("hard tokens");
+                defer perf.stopTimer(t_else);
                 if (isAlpha(string[i])) {
                     while (i < string.len and isAlpha(string[i])) {
                         i += 1;
@@ -210,6 +216,9 @@ const ParseResult = struct {
 };
 
 fn parseValue(allocator: std.mem.Allocator, tokens: []Token) ParseResult {
+    const t = perf.timeFunction(@src());
+    defer perf.stopTimer(t);
+
     var current_token: u32 = 0;
 
     switch (tokens[current_token].kind) {
@@ -335,6 +344,17 @@ fn printUsage() void {
 }
 
 pub fn main() void {
+    perf.resetTimers(.{});
+
+    defer perf.stopTimersAndLog();
+
+    //- ojf: need to set this right at the end, but before the defer stack
+    // starts getting cleared
+    var t_cleanup: perf.TimerFrame = undefined;
+    defer perf.stopTimer(t_cleanup);
+
+    const t_startup = perf.timeBlock("startup");
+
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -346,6 +366,10 @@ pub fn main() void {
 
     //- skip exe name
     _ = arg_iterator.next();
+
+    perf.stopTimer(t_startup);
+
+    const t_file = perf.timeBlock("file loading");
 
     const file = f: {
         const arg_str = arg_iterator.next() orelse {
@@ -365,6 +389,10 @@ pub fn main() void {
     };
     defer allocator.free(json_string);
 
+    perf.stopTimer(t_file);
+
+    const t_parsing = perf.timeBlock("parsing");
+
     const tokens = tokenize(allocator, json_string);
     defer allocator.free(tokens);
 
@@ -375,6 +403,10 @@ pub fn main() void {
     if (@as(JsonValueKind, parsed_value) != .object) {
         @panic("Expected an object with a points array!");
     }
+
+    perf.stopTimer(t_parsing);
+
+    const t_summing = perf.timeBlock("summing");
 
     const points_value = parsed_value.object.get("pairs") orelse {
         @panic("Couldn't find pairs array");
@@ -444,5 +476,13 @@ pub fn main() void {
         distance_sum += distance;
     }
 
+    perf.stopTimer(t_summing);
+
+    const t_printing = perf.timeBlock("printing");
+
     print("Sum: {d}\n", .{distance_sum / @as(f64, @floatFromInt(points_array.items.len))});
+
+    perf.stopTimer(t_printing);
+
+    t_cleanup = perf.timeBlock("cleanup");
 }
